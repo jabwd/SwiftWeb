@@ -29,5 +29,8 @@ public class Server: SocketDelegate {
 	
 	func socketDidAcceptNew(client: Socket, listeningSocket: Socket) {
 		print("New socket was detected: \(client)")
+		
+		let newConnection = Connection(server: self, socket: client, index: connections.count)
+		connections.append(newConnection)
 	}
 }

@@ -105,11 +105,25 @@ public class Socket {
 		}
 		print("[\(type(of: self))] Bound on port \(port)")
 		
+		makeNonBlocking(fd: fileDescriptor)
 		readAvailableEvent = Event(types: [.read, .persistent], fd: fileDescriptor, handler: self)
 		if let ev = readAvailableEvent {
 			EventManager.shared.register(event: ev)
 		}
     }
+	
+	// MARK: - Client socket
+	
+	private func setupAsClient() {
+		makeNonBlocking(fd: fileDescriptor)
+		
+		readAvailableEvent  = Event(types: [.read, .persistent], fd: fileDescriptor, handler: self)
+		
+		// Write events aren't made persistent as it'll keep on spamming while writing is technically
+		// possible. Therefore we manually add write events, or more precisely enable them
+		// when we have data that needs to be written in our buffer.
+		writeAvailableEvent = Event(types: [.write], fd: fileDescriptor, handler: self)
+	}
 	
 	// MARK: -
 	
