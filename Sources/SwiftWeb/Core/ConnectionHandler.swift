@@ -6,5 +6,5 @@
 //
 
 public protocol ConnectionHandler {
-    public func didReceiveData(_ bytes: [UInt8]) -> Void
+    func didReceiveData(_ bytes: [UInt8]) -> Void
 }

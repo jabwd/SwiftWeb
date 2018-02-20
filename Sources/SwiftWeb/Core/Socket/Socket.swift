@@ -10,27 +10,46 @@
     import Darwin
     import CoreFoundation
 #endif
+import SwiftEvent
+
+public enum SocketError: Error {
+	
+}
+
+public enum SocketType {
+	case listening
+	case client
+}
 
 public class Socket {
     public let port: UInt16
     
-    let delegate: SocketDelegate?
-    
+    weak var delegate: SocketDelegate?
+	
+	private var dispatchSource: DispatchSourceFileSystemObject?
     private var fileDescriptor: Int32 = 0
+	private var readAvailableEvent:  Event? = nil
+	private var writeAvailableEvent: Event? = nil
+	private let socketType: SocketType
     
-    init(listen port: UInt16, delegate: SocketListeningDelegate) {
+    init(listen port: UInt16, delegate: SocketDelegate? = nil) {
         self.port = port
         self.delegate = delegate
+		self.socketType = .listening
+		
+		setupForListening()
     }
     
-    init(host: String, port: UInt16, delegate: SocketClientDelegate) {
+    init(host: String, port: UInt16, delegate: SocketDelegate? = nil) {
         self.port = port
         self.delegate = delegate
+		self.socketType = .client
     }
     
-    init(fileDescriptor: Int32, delegate: SocketClientDelegate) {
+    init(fileDescriptor: Int32, delegate: SocketDelegate? = nil) {
         self.port = 0
         self.delegate = delegate
+		self.socketType = .client
     }
     
     deinit {
@@ -53,5 +72,90 @@ public class Socket {
         #else
             fileDescriptor = Darwin.socket(AF_INET, SOCK_STREAM, 0)
         #endif
+		
+		// Allow quick reusage of the local address if applicable
+		var option: Int32 = 1
+		setsockopt(fileDescriptor, SOL_SOCKET, SO_REUSEADDR, &option, UInt32(MemoryLayout<Int32>.size))
+		
+		let result = withUnsafePointer(to: &address) {
+			$0.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockAddress in
+				// Do nothing
+				bind(fileDescriptor, sockAddress, UInt32(MemoryLayout<sockaddr_in>.size))
+			}
+		}
+		guard result == 0 else {
+			switch(errno) {
+			case EBADF:
+				print("[\(type(of: self))] Error: Listen socket is a bad file descriptor!")
+				return
+			case EADDRINUSE:
+				print("[\(type(of: self))] Error: address in use, cannot bind")
+				return
+			case EINVAL:
+				print("[\(type(of: self))] Error: socket is already bound!")
+				return
+			default:
+				print("[\(type(of: self))] Error: socket is already bound!")
+				return
+			}
+		}
+		guard listen(fileDescriptor, 0) == 0 else {
+			print("[\(type(of: self))] Error: Cannot listen on port: \(port)")
+			return
+		}
+		print("[\(type(of: self))] Bound on port \(port)")
+		
+		readAvailableEvent = Event(types: [.read, .persistent], fd: fileDescriptor, handler: self)
+		if let ev = readAvailableEvent {
+			EventManager.shared.register(event: ev)
+		}
     }
+	
+	// MARK: -
+	
+	func disconnect() {
+		close(fileDescriptor)
+		delegate = nil
+	}
+}
+
+extension Socket: EventHandler {
+	public func readEvent() {
+		guard socketType == .listening else {
+			// handle data to read
+			return
+		}
+		guard delegate?.socketShouldAcceptNewClients == true else {
+			disconnect()
+			return
+		}
+		
+		let newClient = accept(fileDescriptor, nil, nil)
+		guard newClient != -1 else {
+			print("[\(type(of: self))] Unable to accept new socket \(errno)")
+			disconnect()
+			return
+		}
+		
+		switch(errno) {
+		case EMFILE, ENFILE:
+			print("[\(type(of: self))] Maximum number of allowed connections reached. Reconfigure your kernel")
+			return
+		case EBADF:
+			print("[\(type(of: self))] Bad file descriptor, cannot accept new client")
+			return
+		default:
+			let newClient = Socket(fileDescriptor: newClient)
+			delegate?.socketDidAcceptNew(client: newClient, listeningSocket: self)
+			return
+		}
+	}
+	
+	public func writeEvent() {
+		guard socketType == .client else {
+			return
+		}
+		
+		print("Writing is available.")
+	}
 }
