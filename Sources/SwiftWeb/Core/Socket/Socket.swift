@@ -11,6 +11,7 @@
     import CoreFoundation
 #endif
 import SwiftEvent
+import Dispatch
 
 public enum SocketError: Error {
 	
@@ -21,44 +22,62 @@ public enum SocketType {
 	case client
 }
 
+fileprivate struct SendBuffer {
+	let data: [UInt8]
+	let tag: Int
+}
+
 public class Socket {
     public let port: UInt16
-    
+	public let socketIndex: Int
+	
     weak var delegate: SocketDelegate?
 	
+	internal weak var server: Server? = nil
 	private var dispatchSource: DispatchSourceFileSystemObject?
     private var fileDescriptor: Int32 = 0
 	private var readAvailableEvent:  Event? = nil
 	private var writeAvailableEvent: Event? = nil
 	private let socketType: SocketType
+	private let workQueue: DispatchQueue
+	private var sendQueue: [UInt8]
+	private var canWrite: Bool = false
     
-    init(listen port: UInt16, delegate: SocketDelegate? = nil) {
+	init(listen port: UInt16, index: Int, delegate: SocketDelegate? = nil) {
         self.port = port
         self.delegate = delegate
 		self.socketType = .listening
+		self.socketIndex = index
+		self.workQueue = DispatchQueue(label: "\(index).connection.queue")
+		self.sendQueue = []
 		
 		setupForListening()
     }
     
-    init(host: String, port: UInt16, delegate: SocketDelegate? = nil) {
+	init(host: String, port: UInt16, index: Int, delegate: SocketDelegate? = nil) {
         self.port = port
         self.delegate = delegate
 		self.socketType = .client
+		self.socketIndex = index
+		self.workQueue = DispatchQueue(label: "\(socketIndex).connection.queue")
+		self.sendQueue = []
 		
 		setupAsClient()
     }
     
-    init(fileDescriptor: Int32, delegate: SocketDelegate? = nil) {
+	init(fileDescriptor: Int32, index: Int, delegate: SocketDelegate? = nil) {
         self.port = 0
         self.delegate = delegate
 		self.socketType = .client
 		self.fileDescriptor = fileDescriptor
+		self.socketIndex = index
+		self.workQueue   = DispatchQueue(label: "\(index).connection.queue")
+		self.sendQueue = []
 		
 		setupAsClient()
     }
     
     deinit {
-		print("Im gone")
     }
     
     // MARK: - Listening socket
@@ -85,10 +104,11 @@ public class Socket {
 		
 		let result = withUnsafePointer(to: &address) {
 			$0.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockAddress in
-				// Do nothing
 				bind(fileDescriptor, sockAddress, UInt32(MemoryLayout<sockaddr_in>.size))
 			}
 		}
+		
+		// TODO: Replace with ErrorNumber enum
 		guard result == 0 else {
 			switch(errno) {
 			case EBADF:
@@ -105,6 +125,7 @@ public class Socket {
 				return
 			}
 		}
+		
 		guard listen(fileDescriptor, 0) == 0 else {
 			print("[\(type(of: self))] Error: Cannot listen on port: \(port)")
 			return
@@ -136,19 +157,68 @@ public class Socket {
 	
 	// MARK: -
 	
-	func disconnect() {
-		server.close(socket: self)
+	public func disconnect() {
+		workQueue.suspend()
+		delegate?.socketWillDisconnect(self)
+		
+		// Get rid of the libevent hooks
+		readAvailableEvent?.handler = nil
+		writeAvailableEvent?.handler = nil
+		readAvailableEvent?.remove()
+		writeAvailableEvent?.remove()
+		readAvailableEvent = nil
+		writeAvailableEvent = nil
+		
+		// Forcably shut down the connection, sometimes close() doesn't do
+		// all the work for us and the other side notices the disconnect rather late
+		shutdown(fileDescriptor, SHUT_RDWR)
 		close(fileDescriptor)
+		delegate?.socketDidDisconnect(self)
 		delegate = nil
+		server?.close(socket: self)
+	}
+	
+	// MARK: - Sending data
+	
+	public func send(bytes: [UInt8], tag: Int) {
+		sendQueue += bytes
+		checkQueue()
+	}
+	
+	private func checkQueue() {
+		guard canWrite == true else {
+			writeAvailableEvent?.add()
+			return
+		}
+		guard sendQueue.count > 0 else {
+			return
+		}
+		canWrite = false
+		
+		let maxSize = 2084
+		let bytesToWrite: Int = sendQueue.count > maxSize ? maxSize : sendQueue.count
+		let bytesWritten = write(fileDescriptor, &sendQueue, bytesToWrite)
+		if bytesWritten < 0 {
+			disconnect()
+			return
+		}
+		sendQueue.removeFirst(bytesWritten)
+		writeAvailableEvent?.add()
 	}
 }
 
 extension Socket: EventHandler {
 	public func readEvent() {
-		guard socketType == .listening else {
-			readAvailableData()
+		if socketType == .listening {
+			attemptAcceptNewClient()
 			return
 		}
+		workQueue.async {
+			self.readAvailableData()
+		}
+	}
+	
+	private func attemptAcceptNewClient() {
 		guard delegate?.socketShouldAcceptNewClients == true else {
 			disconnect()
 			return
@@ -169,14 +239,14 @@ extension Socket: EventHandler {
 			print("[\(type(of: self))] Bad file descriptor, cannot accept new client")
 			return
 		default:
-			let newClient = Socket(fileDescriptor: newClient)
+			let newClient = Socket(fileDescriptor: newClient, index: server?.nextIndex ?? 0)
 			delegate?.socketDidAcceptNew(client: newClient, listeningSocket: self)
 			return
 		}
 	}
 	
 	private func readAvailableData() {
-		let buffSize = 512
+		let buffSize = 1024 // Should be changed to whatever is appropriate for the usage of the socket
 		
 		// Using UnsafeMutablePointer here crashes for some reason.
 		var buffer: [UInt8] = [UInt8](repeating: 0, count: 0)
@@ -190,10 +260,11 @@ extension Socket: EventHandler {
 			part.deallocate(capacity: buffSize)
 		} while( len == buffSize );
 		if len == 0 {
-			// read returns 0 on error, errno is populated with the errors
-			if ErrorNumber.current() != ErrorNumber.tryAgain {
-				disconnect()
-			}
+			disconnect()
+			return
+		}
+		if len == -1 {
+			return
 		}
 		delegate?.socketDidRead(bytes: buffer, socket: self)
 	}
@@ -202,5 +273,7 @@ extension Socket: EventHandler {
 		guard socketType == .client else {
 			return
 		}
+		canWrite = true
+		checkQueue()
 	}
 }
