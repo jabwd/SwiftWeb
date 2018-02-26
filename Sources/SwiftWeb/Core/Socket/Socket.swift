@@ -44,15 +44,21 @@ public class Socket {
         self.port = port
         self.delegate = delegate
 		self.socketType = .client
+		
+		setupAsClient()
     }
     
     init(fileDescriptor: Int32, delegate: SocketDelegate? = nil) {
         self.port = 0
         self.delegate = delegate
 		self.socketType = .client
+		self.fileDescriptor = fileDescriptor
+		
+		setupAsClient()
     }
     
     deinit {
+		print("Im gone")
     }
     
     // MARK: - Listening socket
@@ -115,19 +121,23 @@ public class Socket {
 	// MARK: - Client socket
 	
 	private func setupAsClient() {
-		makeNonBlocking(fd: fileDescriptor)
-		
 		readAvailableEvent  = Event(types: [.read, .persistent], fd: fileDescriptor, handler: self)
 		
 		// Write events aren't made persistent as it'll keep on spamming while writing is technically
 		// possible. Therefore we manually add write events, or more precisely enable them
 		// when we have data that needs to be written in our buffer.
 		writeAvailableEvent = Event(types: [.write], fd: fileDescriptor, handler: self)
+		
+		EventManager.shared.register(event: writeAvailableEvent!)
+		EventManager.shared.register(event: readAvailableEvent!)
+		
+		makeNonBlocking(fd: fileDescriptor)
 	}
 	
 	// MARK: -
 	
 	func disconnect() {
+		server.close(socket: self)
 		close(fileDescriptor)
 		delegate = nil
 	}
@@ -136,7 +146,7 @@ public class Socket {
 extension Socket: EventHandler {
 	public func readEvent() {
 		guard socketType == .listening else {
-			// handle data to read
+			readAvailableData()
 			return
 		}
 		guard delegate?.socketShouldAcceptNewClients == true else {
@@ -165,11 +175,32 @@ extension Socket: EventHandler {
 		}
 	}
 	
+	private func readAvailableData() {
+		let buffSize = 512
+		
+		// Using UnsafeMutablePointer here crashes for some reason.
+		var buffer: [UInt8] = [UInt8](repeating: 0, count: 0)
+		var len = 0
+		repeat {
+			let part = UnsafeMutablePointer<UInt8>.allocate(capacity: buffSize)
+			len = read(fileDescriptor, part, buffSize)
+			if len > 0 {
+				buffer += Array(UnsafeMutableBufferPointer(start: part, count: len))
+			}
+			part.deallocate(capacity: buffSize)
+		} while( len == buffSize );
+		if len == 0 {
+			// read returns 0 on error, errno is populated with the errors
+			if ErrorNumber.current() != ErrorNumber.tryAgain {
+				disconnect()
+			}
+		}
+		delegate?.socketDidRead(bytes: buffer, socket: self)
+	}
+	
 	public func writeEvent() {
 		guard socketType == .client else {
 			return
 		}
-		
-		print("Writing is available.")
 	}
 }

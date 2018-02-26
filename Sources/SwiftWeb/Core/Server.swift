@@ -21,7 +21,7 @@ public class Server: SocketDelegate {
 		
 	}
 	
-	// MARK: -
+	// MARK: Listening for connections
 	
 	var socketShouldAcceptNewClients: Bool {
 		return true
@@ -32,5 +32,11 @@ public class Server: SocketDelegate {
 		
 		let newConnection = Connection(server: self, socket: client, index: connections.count)
 		connections.append(newConnection)
+	}
+	
+	// MARK: - Managing connections
+	
+	internal func close(socket: Socket) {
+		
 	}
 }

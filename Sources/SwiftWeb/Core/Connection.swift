@@ -6,7 +6,7 @@
 //
 import Dispatch
 
-public class Connection: SocketDelegate {
+public class Connection {
     internal let server:          Server
 	internal let socket:          Socket
     internal let connectionIndex: Int
@@ -18,9 +18,25 @@ public class Connection: SocketDelegate {
         self.server          = server
         self.connectionIndex = index
 		self.socket          = socket
+		
+		socket.delegate = self
     }
     
     public func send(bytes: [UInt8]) -> Void {
         
     }
+}
+
+extension Connection: SocketDelegate {
+	func socketDidRead(bytes: [UInt8], socket: Socket) {
+		print("Received bytes: \(bytes)")
+	}
+	
+	func socketDidFail(error: SocketError, socket: Socket) {
+		print("Socket error \(error)")
+	}
+	
+	func socketDidWrite(dataWithTag tag: Int) {
+		print("Wrote data with tag: \(tag)")
+	}
 }
